@@ -22,6 +22,7 @@ jobs:
       SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
       DRY_RUN: "false"
       TIMEZONE: "Europe/Madrid"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -30,19 +31,64 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-          cache: pip
+
+      - name: Locate application
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAIN_FILE="$(find . -type f -path '*/commute_monitor/__main__.py' -print -quit)"
+          if [ -z "$MAIN_FILE" ]; then
+            echo "::error::No encuentro commute_monitor/__main__.py en el repositorio."
+            echo "Contenido disponible:"
+            find . -maxdepth 3 -type f | sort
+            exit 1
+          fi
+
+          PACKAGE_DIR="$(dirname "$MAIN_FILE")"
+          APP_ROOT="$(dirname "$PACKAGE_DIR")"
+          echo "APP_ROOT=$APP_ROOT" >> "$GITHUB_ENV"
+          echo "Aplicación encontrada en: $APP_ROOT"
+
+          if [ ! -f "$APP_ROOT/requirements.txt" ]; then
+            echo "::error::No encuentro requirements.txt en $APP_ROOT"
+            exit 1
+          fi
 
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r "$APP_ROOT/requirements.txt"
 
-      - name: Run commute monitor
-        run: python -m commute_monitor
+      - name: Check reference route
+        shell: bash
+        run: |
+          if [ ! -f "$APP_ROOT/state/reference_route.json" ]; then
+            echo "::error::Falta state/reference_route.json. Debes generar y subir la ruta de referencia antes de medir tráfico."
+            exit 1
+          fi
 
-      - name: Upload daily measurements
+      - name: Manual test - measure now and send email
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          cd "$APP_ROOT"
+          python -m commute_monitor --once --send
+
+      - name: Scheduled morning monitor
+        if: github.event_name == 'schedule'
+        shell: bash
+        run: |
+          cd "$APP_ROOT"
+          python -m commute_monitor
+
+      - name: Upload measurements
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: commute-traffic-${{ github.run_id }}
-          path: output/
+          path: |
+            **/output/*.csv
+            **/output/*.json
           if-no-files-found: ignore
           retention-days: 30

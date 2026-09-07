@@ -20,8 +20,14 @@ jobs:
     env:
       TOMTOM_API_KEY: ${{ secrets.TOMTOM_API_KEY }}
       SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: "465"
+      SMTP_USERNAME: javier.garrido.pino@gmail.com
+      SMTP_FROM: javier.garrido.pino@gmail.com
+      EMAIL_TO: javier.garrido.pino@gmail.com
+      SMTP_STARTTLS: "false"
       DRY_RUN: "false"
-      TIMEZONE: "Europe/Madrid"
+      TIMEZONE: Europe/Madrid
 
     steps:
       - name: Checkout repository
@@ -32,22 +38,47 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Locate application
+      - name: Prepare application
         shell: bash
         run: |
           set -euo pipefail
-          MAIN_FILE="$(find . -type f -path '*/commute_monitor/__main__.py' -print -quit)"
+
+          # Caso ideal: el paquete está ya descomprimido en el repositorio.
+          MAIN_FILE="$(find . -type f -path '*/commute_monitor/__main__.py' -not -path './.runtime_app/*' -print -quit || true)"
+
+          # Caso actual: el código está guardado dentro de un ZIP en el repo.
           if [ -z "$MAIN_FILE" ]; then
-            echo "::error::No encuentro commute_monitor/__main__.py en el repositorio."
-            echo "Contenido disponible:"
-            find . -maxdepth 3 -type f | sort
+            ZIP_FILE="$(find . -maxdepth 2 -type f \( -name 'commute-traffic-monitor-github*.zip' -o -name 'commute-traffic-monitor*.zip' \) -print -quit || true)"
+            if [ -z "$ZIP_FILE" ]; then
+              echo "::error::No encuentro ni commute_monitor/__main__.py ni un ZIP commute-traffic-monitor*.zip."
+              find . -maxdepth 3 -type f | sort
+              exit 1
+            fi
+
+            echo "Código encontrado dentro de: $ZIP_FILE"
+            rm -rf .runtime_app
+            mkdir -p .runtime_app
+            unzip -q "$ZIP_FILE" -d .runtime_app
+            MAIN_FILE="$(find .runtime_app -type f -path '*/commute_monitor/__main__.py' -print -quit || true)"
+          fi
+
+          if [ -z "$MAIN_FILE" ]; then
+            echo "::error::Después de preparar el proyecto sigo sin encontrar commute_monitor/__main__.py."
+            find . -maxdepth 5 -type f | sort
             exit 1
           fi
 
           PACKAGE_DIR="$(dirname "$MAIN_FILE")"
           APP_ROOT="$(dirname "$PACKAGE_DIR")"
           echo "APP_ROOT=$APP_ROOT" >> "$GITHUB_ENV"
-          echo "Aplicación encontrada en: $APP_ROOT"
+          echo "Aplicación preparada en: $APP_ROOT"
+
+          # Si la ruta fija está guardada fuera del ZIP, cópiala al árbol de ejecución.
+          if [ -f "$GITHUB_WORKSPACE/state/reference_route.json" ] && [ ! -f "$APP_ROOT/state/reference_route.json" ]; then
+            mkdir -p "$APP_ROOT/state"
+            cp "$GITHUB_WORKSPACE/state/reference_route.json" "$APP_ROOT/state/reference_route.json"
+            echo "Ruta fija copiada desde el repositorio al árbol de ejecución."
+          fi
 
           if [ ! -f "$APP_ROOT/requirements.txt" ]; then
             echo "::error::No encuentro requirements.txt en $APP_ROOT"
@@ -57,14 +88,43 @@ jobs:
       - name: Install dependencies
         shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install -r "$APP_ROOT/requirements.txt"
 
-      - name: Check reference route
+      - name: Validate secrets
         shell: bash
         run: |
-          if [ ! -f "$APP_ROOT/state/reference_route.json" ]; then
-            echo "::error::Falta state/reference_route.json. Debes generar y subir la ruta de referencia antes de medir tráfico."
+          set -euo pipefail
+          if [ -z "${TOMTOM_API_KEY:-}" ]; then
+            echo "::error::Falta el Repository secret TOMTOM_API_KEY."
+            exit 1
+          fi
+          if [ -z "${SMTP_PASSWORD:-}" ]; then
+            echo "::error::Falta el Repository secret SMTP_PASSWORD (contraseña de aplicación de Gmail)."
+            exit 1
+          fi
+
+      - name: Prepare fixed reference route
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f "$APP_ROOT/state/reference_route.json" ]; then
+            echo "Ruta fija encontrada."
+            echo "ROUTE_GENERATED=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "No existe todavía state/reference_route.json."
+            echo "La generaré ahora para esta prueba manual."
+            cd "$APP_ROOT"
+            DRY_RUN=true python -m commute_monitor.reference_route
+            echo "ROUTE_GENERATED=true" >> "$GITHUB_ENV"
+            cp state/reference_route.json "$GITHUB_WORKSPACE/reference_route.json"
+          else
+            echo "::error::Falta state/reference_route.json. Haz primero una ejecución manual, descarga el artefacto reference-route y súbelo al repositorio como state/reference_route.json."
             exit 1
           fi
 
@@ -72,6 +132,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
+          set -euo pipefail
           cd "$APP_ROOT"
           python -m commute_monitor --once --send
 
@@ -79,8 +140,18 @@ jobs:
         if: github.event_name == 'schedule'
         shell: bash
         run: |
+          set -euo pipefail
           cd "$APP_ROOT"
           python -m commute_monitor
+
+      - name: Upload generated reference route
+        if: github.event_name == 'workflow_dispatch' && env.ROUTE_GENERATED == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: reference-route
+          path: reference_route.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload measurements
         if: always()

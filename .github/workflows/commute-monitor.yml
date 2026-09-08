@@ -2,8 +2,15 @@ name: Morning commute traffic monitor
 
 on:
   schedule:
+    - cron: "55 5 * * 1-5"
+      timezone: "Europe/Madrid"
+
+    - cron: "5 6 * * 1-5"
+      timezone: "Europe/Madrid"
+
     - cron: "15 6 * * 1-5"
       timezone: "Europe/Madrid"
+
   workflow_dispatch:
 
 permissions:

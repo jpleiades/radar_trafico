@@ -4,17 +4,20 @@ on:
   schedule:
     - cron: "55 5 * * 1-5"
       timezone: "Europe/Madrid"
-
     - cron: "5 6 * * 1-5"
       timezone: "Europe/Madrid"
-
     - cron: "15 6 * * 1-5"
       timezone: "Europe/Madrid"
-
   workflow_dispatch:
+    inputs:
+      regenerate_route:
+        description: "Regenerar la ruta fija usando el waypoint correcto"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: morning-commute-traffic
@@ -49,47 +52,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # Caso ideal: el paquete está ya descomprimido en el repositorio.
           MAIN_FILE="$(find . -type f -path '*/commute_monitor/__main__.py' -not -path './.runtime_app/*' -print -quit || true)"
-
-          # Caso actual: el código está guardado dentro de un ZIP en el repo.
           if [ -z "$MAIN_FILE" ]; then
             ZIP_FILE="$(find . -maxdepth 2 -type f \( -name 'commute-traffic-monitor-github*.zip' -o -name 'commute-traffic-monitor*.zip' \) -print -quit || true)"
             if [ -z "$ZIP_FILE" ]; then
               echo "::error::No encuentro ni commute_monitor/__main__.py ni un ZIP commute-traffic-monitor*.zip."
-              find . -maxdepth 3 -type f | sort
               exit 1
             fi
-
-            echo "Código encontrado dentro de: $ZIP_FILE"
             rm -rf .runtime_app
             mkdir -p .runtime_app
             unzip -q "$ZIP_FILE" -d .runtime_app
             MAIN_FILE="$(find .runtime_app -type f -path '*/commute_monitor/__main__.py' -print -quit || true)"
           fi
-
           if [ -z "$MAIN_FILE" ]; then
-            echo "::error::Después de preparar el proyecto sigo sin encontrar commute_monitor/__main__.py."
-            find . -maxdepth 5 -type f | sort
+            echo "::error::No encuentro commute_monitor/__main__.py."
             exit 1
           fi
-
           PACKAGE_DIR="$(dirname "$MAIN_FILE")"
           APP_ROOT="$(dirname "$PACKAGE_DIR")"
           echo "APP_ROOT=$APP_ROOT" >> "$GITHUB_ENV"
-          echo "Aplicación preparada en: $APP_ROOT"
-
-          # Si la ruta fija está guardada fuera del ZIP, cópiala al árbol de ejecución.
-          if [ -f "$GITHUB_WORKSPACE/state/reference_route.json" ] && [ ! -f "$APP_ROOT/state/reference_route.json" ]; then
+          if [ -f "$GITHUB_WORKSPACE/state/reference_route.json" ]; then
             mkdir -p "$APP_ROOT/state"
             cp "$GITHUB_WORKSPACE/state/reference_route.json" "$APP_ROOT/state/reference_route.json"
-            echo "Ruta fija copiada desde el repositorio al árbol de ejecución."
-          fi
-
-          if [ ! -f "$APP_ROOT/requirements.txt" ]; then
-            echo "::error::No encuentro requirements.txt en $APP_ROOT"
-            exit 1
           fi
 
       - name: Install dependencies
@@ -103,35 +87,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${TOMTOM_API_KEY:-}" ]; then
-            echo "::error::Falta el Repository secret TOMTOM_API_KEY."
-            exit 1
-          fi
-          if [ -z "${SMTP_PASSWORD:-}" ]; then
-            echo "::error::Falta el Repository secret SMTP_PASSWORD (contraseña de aplicación de Gmail)."
-            exit 1
-          fi
+          test -n "${TOMTOM_API_KEY:-}" || { echo "::error::Falta TOMTOM_API_KEY"; exit 1; }
+          test -n "${SMTP_PASSWORD:-}" || { echo "::error::Falta SMTP_PASSWORD"; exit 1; }
 
-      - name: Prepare fixed reference route
+      - name: Regenerate fixed route with waypoint
+        if: github.event_name == 'workflow_dispatch' && inputs.regenerate_route == true
         shell: bash
         run: |
           set -euo pipefail
+          python tools/generate_reference_route_waypoint.py "$GITHUB_WORKSPACE/state/reference_route.json"
+          mkdir -p "$APP_ROOT/state"
+          cp "$GITHUB_WORKSPACE/state/reference_route.json" "$APP_ROOT/state/reference_route.json"
 
-          if [ -f "$APP_ROOT/state/reference_route.json" ]; then
-            echo "Ruta fija encontrada."
-            echo "ROUTE_GENERATED=false" >> "$GITHUB_ENV"
-            exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/reference_route.json
+          if git diff --cached --quiet; then
+            echo "La ruta no ha cambiado."
+          else
+            git commit -m "Update fixed commute route via waypoint"
+            git push
           fi
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "No existe todavía state/reference_route.json."
-            echo "La generaré ahora para esta prueba manual."
-            cd "$APP_ROOT"
-            DRY_RUN=true python -m commute_monitor.reference_route
-            echo "ROUTE_GENERATED=true" >> "$GITHUB_ENV"
-            cp state/reference_route.json "$GITHUB_WORKSPACE/reference_route.json"
-          else
-            echo "::error::Falta state/reference_route.json. Haz primero una ejecución manual, descarga el artefacto reference-route y súbelo al repositorio como state/reference_route.json."
+      - name: Check fixed reference route
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$APP_ROOT/state/reference_route.json" ]; then
+            echo "::error::Falta state/reference_route.json. Ejecuta manualmente con regenerate_route=true."
             exit 1
           fi
 
@@ -150,15 +133,6 @@ jobs:
           set -euo pipefail
           cd "$APP_ROOT"
           python -m commute_monitor
-
-      - name: Upload generated reference route
-        if: github.event_name == 'workflow_dispatch' && env.ROUTE_GENERATED == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: reference-route
-          path: reference_route.json
-          if-no-files-found: error
-          retention-days: 30
 
       - name: Upload measurements
         if: always()

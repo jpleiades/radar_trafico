@@ -10,6 +10,14 @@ on:
       timezone: "Europe/Madrid"
   workflow_dispatch:
     inputs:
+      run_mode:
+        description: "Modo de ejecución"
+        required: true
+        default: "test"
+        type: choice
+        options:
+          - test
+          - morning
       regenerate_route:
         description: "Regenerar la ruta fija usando el waypoint correcto"
         required: false
@@ -119,15 +127,15 @@ jobs:
           fi
 
       - name: Manual test - measure now and send email
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && inputs.run_mode != 'morning'
         shell: bash
         run: |
           set -euo pipefail
           cd "$APP_ROOT"
           python -m commute_monitor --once --send
 
-      - name: Scheduled morning monitor
-        if: github.event_name == 'schedule'
+      - name: Morning monitor
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_mode == 'morning')
         shell: bash
         run: |
           set -euo pipefail

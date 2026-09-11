@@ -79,6 +79,13 @@ jobs:
           PACKAGE_DIR="$(dirname "$MAIN_FILE")"
           APP_ROOT="$(dirname "$PACKAGE_DIR")"
           echo "APP_ROOT=$APP_ROOT" >> "$GITHUB_ENV"
+
+          # Aplicar overrides mantenibles fuera del ZIP.
+          if [ -d "$GITHUB_WORKSPACE/overrides/commute_monitor" ]; then
+            cp -f "$GITHUB_WORKSPACE"/overrides/commute_monitor/*.py "$APP_ROOT/commute_monitor/"
+            echo "Overrides de commute_monitor aplicados."
+          fi
+
           if [ -f "$GITHUB_WORKSPACE/state/reference_route.json" ]; then
             mkdir -p "$APP_ROOT/state"
             cp "$GITHUB_WORKSPACE/state/reference_route.json" "$APP_ROOT/state/reference_route.json"
